@@ -1,0 +1,3 @@
+customtkinter
+Aspose.Email-for-Python-via-NET
+packaging
