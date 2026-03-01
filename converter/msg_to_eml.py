@@ -1,5 +1,9 @@
 import os
-import email
+import mimetypes
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import extract_msg
 
 
@@ -70,28 +74,42 @@ class MsgToEmlConverter:
         # Open MSG and build EML
         msg = extract_msg.Message(msg_path)
         try:
-            eml_message = email.message.EmailMessage()
+            has_html = bool(msg.htmlBody)
+            has_body = bool(msg.body)
+            has_attachments = len(msg.attachments) > 0
+
+            # Decide structure
+            if has_attachments or (has_html and has_body):
+                eml = MIMEMultipart("mixed")
+            elif has_html:
+                eml = MIMEMultipart("alternative")
+            else:
+                eml = MIMEMultipart()
 
             # Set headers
             if msg.subject:
-                eml_message["Subject"] = msg.subject
+                eml["Subject"] = msg.subject
             if msg.sender:
-                eml_message["From"] = msg.sender
+                eml["From"] = msg.sender
             if msg.to:
-                eml_message["To"] = msg.to
+                eml["To"] = msg.to
             if msg.cc:
-                eml_message["Cc"] = msg.cc
+                eml["Cc"] = msg.cc
             if msg.date:
-                eml_message["Date"] = str(msg.date)
+                eml["Date"] = str(msg.date)
             if msg.messageId:
-                eml_message["Message-ID"] = msg.messageId
+                eml["Message-ID"] = msg.messageId
 
-            # Set body
-            if msg.htmlBody:
-                eml_message.set_content(msg.body or "", subtype="plain")
-                eml_message.add_alternative(msg.htmlBody, subtype="html")
-            elif msg.body:
-                eml_message.set_content(msg.body, subtype="plain")
+            # Add body
+            if has_html and has_body:
+                alt_part = MIMEMultipart("alternative")
+                alt_part.attach(MIMEText(msg.body, "plain", "utf-8"))
+                alt_part.attach(MIMEText(msg.htmlBody, "html", "utf-8"))
+                eml.attach(alt_part)
+            elif has_html:
+                eml.attach(MIMEText(msg.htmlBody, "html", "utf-8"))
+            elif has_body:
+                eml.attach(MIMEText(msg.body, "plain", "utf-8"))
 
             # Handle attachments
             for attachment in msg.attachments:
@@ -99,22 +117,23 @@ class MsgToEmlConverter:
                     att_name = attachment.longFilename or attachment.shortFilename or "attachment"
                     att_data = attachment.data
                     if att_data:
-                        maintype, _, subtype = (attachment.mimetype or "application/octet-stream").partition("/")
-                        if not subtype:
-                            maintype = "application"
-                            subtype = "octet-stream"
-                        eml_message.add_attachment(
-                            att_data,
-                            maintype=maintype,
-                            subtype=subtype,
-                            filename=att_name
-                        )
+                        # Guess MIME type from filename
+                        mime_type, _ = mimetypes.guess_type(att_name)
+                        if not mime_type:
+                            mime_type = "application/octet-stream"
+                        maintype, subtype = mime_type.split("/", 1)
+
+                        part = MIMEBase(maintype, subtype)
+                        part.set_payload(att_data)
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", "attachment", filename=att_name)
+                        eml.attach(part)
                 except Exception as e:
-                    self._log(f"    [Warning] Could not attach '{att_name}': {e}")
+                    self._log(f"    [Warning] Could not attach file: {e}")
 
             # Write EML file
-            with open(eml_path, "w", encoding="utf-8") as f:
-                f.write(eml_message.as_string())
+            with open(eml_path, "wb") as f:
+                f.write(eml.as_bytes())
 
             self._log(f"    -> Saved: {eml_filename}")
 
